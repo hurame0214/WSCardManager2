@@ -36,7 +36,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
           Copy-Item dist/WSCardManager.exe release/
-          Copy-Item README.txt release/
           Set-Content -Path release/使い方.txt -Value @"
           【WS Card Manager】
 
