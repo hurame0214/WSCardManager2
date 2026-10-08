@@ -45,6 +45,7 @@ jobs:
           初回起動後、ブラウザで http://127.0.0.1:5000 が開きます。
           アプリを終了するときは、EXEの黒い画面を閉じてください。
           "@ -Encoding UTF8
+          
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
