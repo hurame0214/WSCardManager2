@@ -71,34 +71,34 @@ def card_row(r):
                 notes=r["notes"],**z)
 
 def official_card_url(card_number):
-    # The official site searches by card number on /cardlist/search/.
-    return OFFICIAL + "/cardlist/search/?" + urllib.parse.urlencode({
-        "keyword": card_number, "keyword_type[]": "no"
-    })
+    """Official public card detail URL."""
+    return OFFICIAL + "/cardlist/?" + urllib.parse.urlencode({"cardno": card_number})
 
 
-def parse_official_search(html, card_number, base_url):
-    """Find an exact card number in the official text-view search results."""
+def parse_official_json(payload, card_number):
+    """Select only an exact card-number match from the official JSON response."""
     number = (card_number or "").strip().upper()
     if not number:
         raise ValueError("カード番号を入力してください。")
-    soup = BeautifulSoup(html, "html.parser")
-    pattern = re.compile(r"^(.+?)\s*\(([^()]+)\)\s*-\s*([^\s]+)\s*$")
-    for item in soup.select("ul#js-cardListText li.card__item"):
-        name_tag = item.select_one("p.card__name")
-        if not name_tag:
+    items = payload.get("items", []) if isinstance(payload, dict) else []
+    if not isinstance(items, list):
+        raise ValueError("公式サイトの応答形式が変更された可能性があります。")
+    for item in items:
+        if not isinstance(item, dict):
             continue
-        match = pattern.match(name_tag.get_text(" ", strip=True))
-        if not match or match.group(2).strip().upper() != number:
+        if str(item.get("card_number", "")).strip().upper() != number:
             continue
-        card_name, _, rarity = match.groups()
-        img = item.select_one("a.card__imgLink img")
-        src = (img.get("data-src") or img.get("src") or "") if img else ""
-        image_url = urllib.parse.urljoin(base_url, src) if src and not src.startswith("data:") else ""
-        # The search result does not label a title for this individual card.
-        return {"url": base_url, "name": card_name.strip(),
-                "card_number": number, "rarity": rarity.strip(),
-                "image_url": image_url, "title": ""}
+        picture = str(item.get("picture") or "").strip().lstrip("/")
+        # The API supplies a relative card-image filename, not a full URL.
+        image_url = urllib.parse.urljoin(OFFICIAL + "/cardlist/cardimages/", picture) if picture else ""
+        return {
+            "url": official_card_url(number),
+            "name": str(item.get("card_name") or "").strip(),
+            "card_number": number,
+            "rarity": str(item.get("rare") or "").strip(),
+            "image_url": image_url,
+            "title": "",
+        }
     raise ValueError("公式サイトで一致するカード番号が見つかりませんでした。")
 
 
@@ -106,10 +106,17 @@ def fetch_official(card_number=None, name=None):
     number = (card_number or "").strip().upper()
     if not number:
         raise ValueError("カード番号を入力してください。")
-    url = official_card_url(number)
-    response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    url = OFFICIAL + "/manage/CardListUser/searchJson"
+    response = requests.get(
+        url,
+        params={"keyword": number, "keyword_type[]": "no"},
+        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json",
+                 "Referer": OFFICIAL + "/cardlist/search/"},
+        timeout=20,
+    )
     response.raise_for_status()
-    return parse_official_search(response.text, number, response.url)
+    return parse_official_json(response.json(), number)
+
 
 def download_image(url, card_id):
     if not url: return ""
