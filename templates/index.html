@@ -1,0 +1,10 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WS Card Manager</title><link rel="stylesheet" href="/static/style.css"></head><body>
+<header class="top"><div class="brand">WS Card Manager</div><a class="add" href="/card/new">＋ カード追加</a></header><main class="wrap">
+<section class="stats">
+{% for label,value in [("登録カード",stats.cards),("所持枚数",stats.qty|string+" 枚"),("購入総額","¥"+("{:,.0f}".format(stats.buy))),("売却総額","¥"+("{:,.0f}".format(stats.sell))),("売却利益","¥"+("{:,.0f}".format(stats.profit))),("現在の取得原価","¥"+("{:,.0f}".format(stats.cost)))] %}<div class="stat"><small>{{label}}</small><strong>{{value}}</strong></div>{% endfor %}
+</section>
+<form class="toolbar"><input class="search" name="q" value="{{q}}" placeholder="カード名・カード番号・タイトルで検索"><button class="btn">検索</button></form>
+{% if cards %}<table class="table"><thead><tr><th></th><th>カード名</th><th>カード番号</th><th>所持</th><th>平均取得単価</th><th>現在取得原価</th><th>売却総額</th><th>利益</th></tr></thead><tbody>
+{% for c in cards %}<tr><td>{% if c.image_path %}<img class="thumb" src="/images/{{c.image_path}}">{% elif c.image_url %}<img class="thumb" src="{{c.image_url}}">{% endif %}</td><td><a href="/card/{{c.id}}"><b>{{c.name}}</b></a><br><span class="muted">{{c.title}}</span></td><td>{{c.card_number}}</td><td>{{c.qty}} 枚</td><td>¥{{"{:,.0f}".format(c.avg)}}</td><td>¥{{"{:,.0f}".format(c.cost)}}</td><td>¥{{"{:,.0f}".format(c.sell_total)}}</td><td class="profit">¥{{"{:,.0f}".format(c.realized)}}</td></tr>{% endfor %}
+</tbody></table>{% else %}<div class="panel">まだカードが登録されていません。「＋ カード追加」から登録してください。</div>{% endif %}
+</main></body></html>
