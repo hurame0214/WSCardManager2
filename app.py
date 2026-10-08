@@ -71,62 +71,45 @@ def card_row(r):
                 notes=r["notes"],**z)
 
 def official_card_url(card_number):
-    return OFFICIAL + "/cardlist/?cardno=" + urllib.parse.quote(card_number,safe="")
+    # The official site searches by card number on /cardlist/search/.
+    return OFFICIAL + "/cardlist/search/?" + urllib.parse.urlencode({
+        "keyword": card_number, "keyword_type[]": "no"
+    })
+
+
+def parse_official_search(html, card_number, base_url):
+    """Find an exact card number in the official text-view search results."""
+    number = (card_number or "").strip().upper()
+    if not number:
+        raise ValueError("カード番号を入力してください。")
+    soup = BeautifulSoup(html, "html.parser")
+    pattern = re.compile(r"^(.+?)\s*\(([^()]+)\)\s*-\s*([^\s]+)\s*$")
+    for item in soup.select("ul#js-cardListText li.card__item"):
+        name_tag = item.select_one("p.card__name")
+        if not name_tag:
+            continue
+        match = pattern.match(name_tag.get_text(" ", strip=True))
+        if not match or match.group(2).strip().upper() != number:
+            continue
+        card_name, _, rarity = match.groups()
+        img = item.select_one("a.card__imgLink img")
+        src = (img.get("data-src") or img.get("src") or "") if img else ""
+        image_url = urllib.parse.urljoin(base_url, src) if src and not src.startswith("data:") else ""
+        # The search result does not label a title for this individual card.
+        return {"url": base_url, "name": card_name.strip(),
+                "card_number": number, "rarity": rarity.strip(),
+                "image_url": image_url, "title": ""}
+    raise ValueError("公式サイトで一致するカード番号が見つかりませんでした。")
+
 
 def fetch_official(card_number=None, name=None):
-    """Read only a card entry matching the requested number; never use site logos."""
     number = (card_number or "").strip().upper()
     if not number:
         raise ValueError("カード番号を入力してください。")
     url = official_card_url(number)
     response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
     response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
-    # The official site may render card details with JavaScript. In that case
-    # requests cannot read them, so return an error rather than false data.
-    pattern = re.compile(r"^(.+?)\s*\(" + re.escape(number) + r"\)\s*-\s*([A-Z0-9+]+)$", re.I)
-    card_name = ""
-    rarity = ""
-    for element in soup.find_all(["a", "h1", "h2", "h3", "h4", "p", "span", "div"]):
-        value = element.get_text(" ", strip=True)
-        if len(value) > 200:
-            continue
-        match = pattern.match(value)
-        if match:
-            card_name, rarity = match.group(1).strip(), match.group(2).strip()
-            break
-    if not card_name:
-        # Some official pages display the number and name in separate nodes.
-        # A matching image alt is stronger evidence than the generic page title.
-        for img in soup.find_all("img"):
-            alt = (img.get("alt") or "").strip()
-            if alt and alt not in ("カードリスト", "Card List"):
-                parent = img.find_parent(["article", "li", "section", "div"])
-                if parent and number in parent.get_text(" ", strip=True).upper():
-                    card_name = alt
-                    break
-    if not card_name:
-        raise ValueError("公式ページからカード情報を確認できませんでした。手動入力してください。")
-    image_url = ""
-    for img in soup.find_all("img"):
-        alt = (img.get("alt") or "").strip()
-        if alt != card_name:
-            continue
-        src = img.get("data-src") or img.get("src") or ""
-        if src and not src.startswith("data:"):
-            image_url = urllib.parse.urljoin(response.url, src)
-            break
-    title = ""
-    # Extract a series name only when a labeled field is present.
-    for element in soup.find_all(["dt", "th"]):
-        if element.get_text(" ", strip=True) in ("ネオスタンダード区分", "収録商品"):
-            sibling = element.find_next_sibling(["dd", "td"])
-            if sibling:
-                title = sibling.get_text(" ", strip=True)
-                if title and title != "-":
-                    break
-    return {"url": response.url, "name": card_name, "card_number": number,
-            "rarity": rarity, "image_url": image_url, "title": title}
+    return parse_official_search(response.text, number, response.url)
 
 def download_image(url, card_id):
     if not url: return ""
