@@ -73,42 +73,60 @@ def card_row(r):
 def official_card_url(card_number):
     return OFFICIAL + "/cardlist/?cardno=" + urllib.parse.quote(card_number,safe="")
 
-def fetch_official(card_number=None,name=None):
-    headers={"User-Agent":"Mozilla/5.0 WSCardManager/2.0"}
-    url=official_card_url(card_number) if card_number else OFFICIAL+"/cardlist/search/?keyword="+urllib.parse.quote(name or "")
-    r=requests.get(url,headers=headers,timeout=20)
-    r.raise_for_status()
-    soup=BeautifulSoup(r.text,"html.parser")
-    text=soup.get_text(" ",strip=True)
-    result={"url":r.url,"name":name or "","card_number":card_number or "","rarity":"","image_url":"","title":""}
-    if not result["card_number"]:
-        m=re.search(r"([A-Z0-9]+/[A-Z0-9]+-\d{1,4}[A-Z]*)",text)
-        if m: result["card_number"]=m.group(1)
-    # Try structured/meta information first.
-    title=soup.title.get_text(" ",strip=True) if soup.title else ""
-    if not result["name"] and title:
-        result["name"]=re.sub(r"\s*[-|｜].*$","",title).strip()
-    for tag in soup.find_all(["h1","h2","h3","h4","strong","a"]):
-        t=tag.get_text(" ",strip=True)
-        if result["card_number"] and result["card_number"] in t:
-            if not result["name"]: result["name"]=t.split("(")[0].strip()
-            mm=re.search(r"\)\s*-\s*([A-Z0-9]+)",t)
-            if mm: result["rarity"]=mm.group(1)
+def fetch_official(card_number=None, name=None):
+    """Read only a card entry matching the requested number; never use site logos."""
+    number = (card_number or "").strip().upper()
+    if not number:
+        raise ValueError("カード番号を入力してください。")
+    url = official_card_url(number)
+    response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    # The official site may render card details with JavaScript. In that case
+    # requests cannot read them, so return an error rather than false data.
+    pattern = re.compile(r"^(.+?)\s*\(" + re.escape(number) + r"\)\s*-\s*([A-Z0-9+]+)$", re.I)
+    card_name = ""
+    rarity = ""
+    for element in soup.find_all(["a", "h1", "h2", "h3", "h4", "p", "span", "div"]):
+        value = element.get_text(" ", strip=True)
+        if len(value) > 200:
+            continue
+        match = pattern.match(value)
+        if match:
+            card_name, rarity = match.group(1).strip(), match.group(2).strip()
             break
-    imgs=[]
+    if not card_name:
+        # Some official pages display the number and name in separate nodes.
+        # A matching image alt is stronger evidence than the generic page title.
+        for img in soup.find_all("img"):
+            alt = (img.get("alt") or "").strip()
+            if alt and alt not in ("カードリスト", "Card List"):
+                parent = img.find_parent(["article", "li", "section", "div"])
+                if parent and number in parent.get_text(" ", strip=True).upper():
+                    card_name = alt
+                    break
+    if not card_name:
+        raise ValueError("公式ページからカード情報を確認できませんでした。手動入力してください。")
+    image_url = ""
     for img in soup.find_all("img"):
-        src=img.get("src") or img.get("data-src") or ""
-        if not src: continue
-        full=urllib.parse.urljoin(r.url,src)
-        low=full.lower()
-        score=0
-        if result["card_number"] and result["card_number"].lower().replace("/","") in low.replace("/",""): score+=8
-        if any(x in low for x in ["card","cardlist"]): score+=3
-        if any(x in low for x in ["logo","icon","favicon","arrow","menu"]): score-=8
-        imgs.append((score,full))
-    if imgs:
-        imgs.sort(reverse=True); result["image_url"]=imgs[0][1]
-    return result
+        alt = (img.get("alt") or "").strip()
+        if alt != card_name:
+            continue
+        src = img.get("data-src") or img.get("src") or ""
+        if src and not src.startswith("data:"):
+            image_url = urllib.parse.urljoin(response.url, src)
+            break
+    title = ""
+    # Extract a series name only when a labeled field is present.
+    for element in soup.find_all(["dt", "th"]):
+        if element.get_text(" ", strip=True) in ("ネオスタンダード区分", "収録商品"):
+            sibling = element.find_next_sibling(["dd", "td"])
+            if sibling:
+                title = sibling.get_text(" ", strip=True)
+                if title and title != "-":
+                    break
+    return {"url": response.url, "name": card_name, "card_number": number,
+            "rarity": rarity, "image_url": image_url, "title": title}
 
 def download_image(url, card_id):
     if not url: return ""
