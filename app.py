@@ -1,7 +1,7 @@
 import os, re, sqlite3, urllib.parse
 from datetime import date
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify, redirect, url_for, send_from_directory
+from flask import Flask, render_template, request, jsonify, redirect, url_for, send_from_directory, render_template_string
 import requests
 from bs4 import BeautifulSoup
 
@@ -244,6 +244,46 @@ def official_image(card_id):
     except Exception:
         pass
     c.close(); return redirect(url_for("card_detail",card_id=card_id))
+
+
+BULK_HTML = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>カード一括登録</title><link rel="stylesheet" href="/static/style.css"><style>body{background:#f4f5f8}main{max-width:900px;margin:35px auto;padding:0 16px}.bulk-box{background:white;border:1px solid #ddd;border-radius:12px;padding:25px}textarea{box-sizing:border-box;width:100%;min-height:240px;padding:12px;font-size:16px}button{cursor:pointer;padding:12px 25px;background:#5956df;color:white;border:0;border-radius:6px}a{color:#3939b3}.results{margin-top:22px}li{margin:7px 0}.error{color:#bd2536}.success{color:#176d43}</style></head><body><header class="top"><a class="brand" href="/">WS Card Manager</a></header><main><div class="bulk-box"><h1>カード一括登録</h1><p>カード番号を1行に1件ずつ入力してください。公式サイトからカード名・レアリティ・画像URLを取得します。</p><p>すでに同じカード番号が登録されている場合はスキップします。購入・売却履歴は変更しません。</p><form method="post"><textarea name="numbers" required placeholder="DAL/W79-001&#10;THP/S130-001">{{ numbers }}</textarea><p><button type="submit">まとめて登録する</button>　<a href="/">カード一覧に戻る</a></p></form>{% if results is not none %}<div class="results"><h2>処理結果</h2><p>登録：{{ created }}件 / スキップ：{{ skipped }}件 / エラー：{{ failed }}件</p><ul>{% for r in results %}<li class="{{ 'error' if r.status == 'エラー' else 'success' }}">{{ r.number }}：{{ r.status }}{% if r.detail %}（{{ r.detail }}）{% endif %}</li>{% endfor %}</ul></div>{% endif %}</div></main></body></html>"""
+
+@app.route("/bulk", methods=["GET", "POST"])
+def bulk_register():
+    if request.method == "GET":
+        return render_template_string(BULK_HTML, numbers="", results=None)
+    raw = request.form.get("numbers", "")
+    numbers = [x.strip().upper() for x in raw.splitlines() if x.strip()]
+    if len(numbers) > 100:
+        return render_template_string(BULK_HTML, numbers=raw, results=[{"number":"-", "status":"エラー", "detail":"一度に登録できるのは100件までです"}], created=0, skipped=0, failed=1), 400
+    results = []
+    created = skipped = failed = 0
+    seen = set()
+    for number in numbers:
+        if number in seen:
+            skipped += 1
+            results.append({"number":number, "status":"スキップ", "detail":"入力内で重複"})
+            continue
+        seen.add(number)
+        try:
+            with db() as c:
+                existing = c.execute("SELECT id FROM cards WHERE UPPER(card_number)=?", (number,)).fetchone()
+                if existing:
+                    skipped += 1
+                    results.append({"number":number, "status":"スキップ", "detail":"登録済み"})
+                    continue
+            data = fetch_official(number)
+            if not data.get("name"):
+                raise ValueError("公式カード名が取得できませんでした")
+            with db() as c:
+                c.execute("INSERT INTO cards(name,card_number,title,rarity,image_url,notes) VALUES(?,?,?,?,?,?)", (data["name"], number, data.get("title", ""), data.get("rarity", ""), data.get("image_url", ""), ""))
+                c.commit()
+            created += 1
+            results.append({"number":number, "status":"登録完了", "detail":data["name"]})
+        except Exception as e:
+            failed += 1
+            results.append({"number":number, "status":"エラー", "detail":str(e)})
+    return render_template_string(BULK_HTML, numbers=raw, results=results, created=created, skipped=skipped, failed=failed)
 
 @app.route("/images/<path:name>")
 def images(name):
