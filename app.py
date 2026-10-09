@@ -246,12 +246,24 @@ def official_image(card_id):
     c.close(); return redirect(url_for("card_detail",card_id=card_id))
 
 
-BULK_HTML = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>カード一括登録</title><link rel="stylesheet" href="/static/style.css"><style>body{background:#f4f5f8}main{max-width:900px;margin:35px auto;padding:0 16px}.bulk-box{background:white;border:1px solid #ddd;border-radius:12px;padding:25px}textarea{box-sizing:border-box;width:100%;min-height:240px;padding:12px;font-size:16px}button{cursor:pointer;padding:12px 25px;background:#5956df;color:white;border:0;border-radius:6px}a{color:#3939b3}.results{margin-top:22px}li{margin:7px 0}.error{color:#bd2536}.success{color:#176d43}</style></head><body><header class="top"><a class="brand" href="/">WS Card Manager</a></header><main><div class="bulk-box"><h1>カード一括登録</h1><p>カード番号を1行に1件ずつ入力してください。公式サイトからカード名・レアリティ・画像URLを取得します。</p><p>すでに同じカード番号が登録されている場合はスキップします。購入・売却履歴は変更しません。</p><form method="post"><textarea name="numbers" required placeholder="DAL/W79-001&#10;THP/S130-001">{{ numbers }}</textarea><p><button type="submit">まとめて登録する</button>　<a href="/">カード一覧に戻る</a></p></form>{% if results is not none %}<div class="results"><h2>処理結果</h2><p>登録：{{ created }}件 / スキップ：{{ skipped }}件 / エラー：{{ failed }}件</p><ul>{% for r in results %}<li class="{{ 'error' if r.status == 'エラー' else 'success' }}">{{ r.number }}：{{ r.status }}{% if r.detail %}（{{ r.detail }}）{% endif %}</li>{% endfor %}</ul></div>{% endif %}</div></main></body></html>"""
+BULK_HTML = """<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>カード一括登録</title><link rel="stylesheet" href="/static/style.css"><style>body{background:#f4f5f8}main{max-width:900px;margin:35px auto;padding:0 16px}.bulk-box{background:white;border:1px solid #ddd;border-radius:12px;padding:25px}textarea{box-sizing:border-box;width:100%;min-height:240px;padding:12px;font-size:16px}button{cursor:pointer;padding:12px 25px;background:#5956df;color:white;border:0;border-radius:6px}a{color:#3939b3}.results{margin-top:22px}li{margin:7px 0}.error{color:#bd2536}.success{color:#176d43}.purchase-fields{display:flex;flex-wrap:wrap;gap:14px;margin:20px 0}.purchase-fields label{display:flex;flex-direction:column;gap:6px;flex:1;min-width:180px}.purchase-fields input{padding:10px;font-size:16px;border:1px solid #bbb;border-radius:6px}</style></head><body><header class="top"><a class="brand" href="/">WS Card Manager</a></header><main><div class="bulk-box"><h1>カード一括登録</h1><p>カード番号を1行に1件ずつ入力してください。公式サイトからカード名・レアリティ・画像URLを取得します。</p><p>すでに同じカード番号が登録されている場合はスキップします。登録済みカードの購入・売却履歴は変更しません。</p><form method="post"><textarea name="numbers" required placeholder="DAL/W79-001&#10;THP/S130-001">{{ numbers }}</textarea><div class="purchase-fields"><label>購入枚数<input name="buy_quantity" type="number" min="0" step="1" value="{{ buy_quantity if buy_quantity is defined else 1 }}" required></label><label>購入合計金額（円）<input name="buy_total_amount" type="number" min="0" step="1" value="{{ buy_total_amount if buy_total_amount is defined else '' }}" placeholder="未入力の場合は0円"></label><label>購入日<input name="trans_date" id="bulk_purchase_date" type="date" value="{{ trans_date if trans_date is defined else '' }}"></label></div><p>購入情報は新しく登録する各カードに共通で適用します。</p><p><button type="submit">まとめて登録する</button>　<a href="/">カード一覧に戻る</a></p></form>{% if results is not none %}<div class="results"><h2>処理結果</h2><p>登録：{{ created }}件 / スキップ：{{ skipped }}件 / エラー：{{ failed }}件</p><ul>{% for r in results %}<li class="{{ 'error' if r.status == 'エラー' else 'success' }}">{{ r.number }}：{{ r.status }}{% if r.detail %}（{{ r.detail }}）{% endif %}</li>{% endfor %}</ul></div>{% endif %}</div></main><script>const dateInput=document.getElementById('bulk_purchase_date');if(dateInput&&!dateInput.value){const now=new Date();dateInput.value=new Date(now.getTime()-now.getTimezoneOffset()*60000).toISOString().slice(0,10);}</script></body></html>"""
 
 @app.route("/bulk", methods=["GET", "POST"])
 def bulk_register():
     if request.method == "GET":
         return render_template_string(BULK_HTML, numbers="", results=None)
+    try:
+        buy_quantity = int(request.form.get("buy_quantity") or 0)
+        buy_total = int(request.form.get("buy_total_amount") or 0)
+        buy_date = request.form.get("trans_date") or date.today().isoformat()
+
+        if buy_quantity < 0 or buy_total < 0:
+            raise ValueError("購入枚数と購入金額は0以上にしてください")
+        if buy_quantity == 0 and buy_total > 0:
+            raise ValueError("購入金額を入力した場合は購入枚数も入力してください")
+        date.fromisoformat(buy_date)
+    except (ValueError, TypeError) as e:
+        return str(e), 400
     raw = request.form.get("numbers", "")
     numbers = [x.strip().upper() for x in raw.splitlines() if x.strip()]
     if len(numbers) > 100:
@@ -276,10 +288,28 @@ def bulk_register():
             if not data.get("name"):
                 raise ValueError("公式カード名が取得できませんでした")
             with db() as c:
-                c.execute("INSERT INTO cards(name,card_number,title,rarity,image_url,notes) VALUES(?,?,?,?,?,?)", (data["name"], number, data.get("title", ""), data.get("rarity", ""), data.get("image_url", ""), ""))
-                c.commit()
-            created += 1
-            results.append({"number":number, "status":"登録完了", "detail":data["name"]})
+                cursor = c.execute(
+                    "INSERT INTO cards(name,card_number,title,rarity,image_url,notes) VALUES(?,?,?,?,?,?)",
+                    (data["name"], number, data.get("title", ""), data.get("rarity", ""), data.get("image_url", ""), "")
+                )
+                card_id = cursor.lastrowid
+
+            if buy_quantity > 0:
+                 c.execute(
+                    "INSERT INTO transactions(card_id,kind,unit_price,quantity,trans_date,memo) VALUES(?,?,?,?,?,?)",
+                     (
+                        card_id,
+                         "buy",
+                         buy_total / buy_quantity,
+                        buy_quantity,
+                         buy_date,
+                         ""
+                     )
+                 )
+
+                 c.commit()
+        　 created += 1
+         　results.append({"number":number, "status":"登録完了", "detail":data["name"]})
         except Exception as e:
             failed += 1
             results.append({"number":number, "status":"エラー", "detail":str(e)})
