@@ -308,8 +308,8 @@ def bulk_register():
                  )
 
                  c.commit()
-        　 created += 1
-         　results.append({"number":number, "status":"登録完了", "detail":data["name"]})
+            created += 1
+            results.append({"number":number, "status":"登録完了", "detail":data["name"]})
         except Exception as e:
             failed += 1
             results.append({"number":number, "status":"エラー", "detail":str(e)})
