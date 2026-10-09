@@ -90,7 +90,7 @@ def parse_official_json(payload, card_number):
             continue
         picture = str(item.get("picture") or "").strip().lstrip("/")
         # The API supplies a relative card-image filename, not a full URL.
-        image_url = urllib.parse.urljoin(OFFICIAL + "/cardlist/cardimages/", picture) if picture else ""
+        image_url = urllib.parse.urljoin(OFFICIAL + "/wordpress/wp-content/images/cardlist/", picture) if picture else ""
         return {
             "url": official_card_url(number),
             "name": str(item.get("card_name") or "").strip(),
