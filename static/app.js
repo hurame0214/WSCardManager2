@@ -14,3 +14,26 @@ async function officialLookup(){
   box.innerHTML="取得しました。内容を確認して保存してください。"+(d.image_url?'<br><img class="thumb" src="'+d.image_url+'">':"");
  }catch(e){box.textContent="取得できませんでした: "+e.message}
 }
+async function checkDuplicate(){
+ const el=document.querySelector('#card_number');
+ const box=document.querySelector('#duplicateNotice');
+ if(!el||!box)return false;
+ const number=el.value.trim();
+ if(!number){box.hidden=true;return false;}
+ try{
+  const response=await fetch('/api/card-exists?'+new URLSearchParams({card_number:number}));
+  const data=await response.json();
+  if(data.exists){
+   box.hidden=false;
+   box.textContent='このカード番号は登録済みです。既存カードの詳細ページへ移動します。';
+   window.location.assign(data.url);
+   return true;
+  }
+  box.hidden=true;
+ }catch(e){box.hidden=true;}
+ return false;
+}
+document.addEventListener('DOMContentLoaded',()=>{
+ const number=document.querySelector('#card_number');
+ if(number)number.addEventListener('change',checkDuplicate);
+});

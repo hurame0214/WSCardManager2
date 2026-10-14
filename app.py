@@ -1,5 +1,6 @@
 import os, re, sqlite3, urllib.parse
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, redirect, url_for, send_from_directory, render_template_string
 import requests
@@ -39,6 +40,7 @@ def init_db():
       card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
       kind TEXT NOT NULL CHECK(kind IN ('buy','sell')),
       unit_price REAL NOT NULL,
+      total_amount INTEGER,
       quantity INTEGER NOT NULL CHECK(quantity > 0),
       trans_date TEXT NOT NULL,
       memo TEXT DEFAULT '',
@@ -47,7 +49,32 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_cards_name ON cards(name);
     CREATE INDEX IF NOT EXISTS idx_tx_card ON transactions(card_id);
     """)
+    columns = {row[1] for row in c.execute("PRAGMA table_info(transactions)")}
+    if "total_amount" not in columns:
+        c.execute("ALTER TABLE transactions ADD COLUMN total_amount INTEGER")
     c.commit(); c.close()
+
+def tx_amount(row):
+    return row["total_amount"] if row["total_amount"] is not None else row["unit_price"] * row["quantity"]
+
+def valid_amount(value):
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError):
+        raise ValueError("合計金額を正しく入力してください")
+    if not amount.is_finite() or amount < 0 or amount != amount.to_integral_value():
+        raise ValueError("合計金額は0以上の整数（円）で入力してください")
+    return int(amount)
+
+def normalized_number(value):
+    return (value or "").strip().upper()
+
+def find_existing(c, number, exclude_id=None):
+    if not number:
+        return None
+    if exclude_id is None:
+        return c.execute("SELECT id FROM cards WHERE UPPER(TRIM(card_number))=? LIMIT 1", (number,)).fetchone()
+    return c.execute("SELECT id FROM cards WHERE UPPER(TRIM(card_number))=? AND id<>? LIMIT 1", (number,exclude_id)).fetchone()
 
 def calc(card_id):
     c=db()
@@ -55,13 +82,13 @@ def calc(card_id):
     c.close()
     qty=cost=buy_total=sell_total=realized=0.0
     for r in rows:
-        q=r["quantity"]; p=r["unit_price"]
+        q=r["quantity"]; amount=tx_amount(r)
         if r["kind"]=="buy":
-            qty += q; cost += q*p; buy_total += q*p
+            qty += q; cost += amount; buy_total += amount
         elif q <= qty:
             avg = cost/qty if qty else 0
-            realized += q*p - avg*q
-            qty -= q; cost -= avg*q; sell_total += q*p
+            realized += amount - avg*q
+            qty -= q; cost -= avg*q; sell_total += amount
     return {"qty":int(qty),"cost":cost,"avg":cost/qty if qty else 0,"buy_total":buy_total,"sell_total":sell_total,"realized":realized}
 
 def card_row(r):
@@ -153,7 +180,7 @@ def card_detail(card_id):
     if not r: return "Not found",404
     tx=c.execute("SELECT * FROM transactions WHERE card_id=? ORDER BY trans_date DESC,id DESC",(card_id,)).fetchall()
     c.close()
-    return render_template("card.html",card=card_row(r),transactions=[dict(x) for x in tx],today=date.today().isoformat())
+    return render_template("card.html",card=card_row(r),transactions=[dict(x, amount=tx_amount(x)) for x in tx],today=date.today().isoformat())
 
 @app.route("/card/new",methods=["GET","POST"])
 def new_card():
@@ -161,7 +188,7 @@ def new_card():
         f=request.form
         initial_tx=None
         qty=int(f.get("buy_quantity") or 0)
-        total=int(float(f.get("buy_total_amount") or 0))
+        total=valid_amount(f.get("buy_total_amount") or 0)
         if qty < 0 or total < 0:
             return render_template("error.html",message="買った枚数と合計金額は0以上で入力してください"),400
         if qty > 0 or total > 0:
@@ -176,8 +203,13 @@ def new_card():
                 "memo": "",
             }
         c=db()
+        number=normalized_number(f.get("card_number"))
+        existing=find_existing(c,number)
+        if existing:
+            c.close()
+            return redirect(url_for("card_detail",card_id=existing["id"]))
         cur=c.execute("INSERT INTO cards(name,card_number,title,rarity,image_url,notes) VALUES(?,?,?,?,?,?)",
-                      (f["name"].strip(),f.get("card_number","").strip(),f.get("title","").strip(),
+                      (f["name"].strip(),number,f.get("title","").strip(),
                        f.get("rarity","").strip(),f.get("image_url","").strip(),f.get("notes","").strip()))
         cid=cur.lastrowid
         if initial_tx:
@@ -188,17 +220,27 @@ def new_card():
     return render_template("new_card.html")
 
 def add_tx(card_id,kind,f):
-    qty=int(f["quantity"])
-    if qty<=0: raise ValueError("invalid transaction")
-    price=float(f["unit_price"])
-    if price<0: raise ValueError("invalid transaction")
+    if kind not in ("buy","sell"):
+        raise ValueError("取引種類が正しくありません")
+    try:
+        qty=int(f["quantity"])
+    except (ValueError, KeyError, TypeError):
+        raise ValueError("枚数を正しく入力してください")
+    if qty<=0: raise ValueError("枚数は1以上にしてください")
+    total=valid_amount(f.get("total_amount"))
+    trans_date=f.get("trans_date") or date.today().isoformat()
+    date.fromisoformat(trans_date)
     c=db()
-    if kind=="sell":
-        z=calc(card_id)
-        if qty>z["qty"]: raise ValueError("売却枚数が所持枚数を超えています")
-    c.execute("INSERT INTO transactions(card_id,kind,unit_price,quantity,trans_date,memo) VALUES(?,?,?,?,?,?)",
-              (card_id,kind,price,qty,f.get("trans_date") or date.today().isoformat(),f.get("memo","").strip()))
-    c.commit(); c.close()
+    try:
+        if not c.execute("SELECT 1 FROM cards WHERE id=?",(card_id,)).fetchone():
+            raise ValueError("カードが見つかりません")
+        if kind=="sell" and qty>calc(card_id)["qty"]:
+            raise ValueError("売却枚数が所持枚数を超えています")
+        c.execute("INSERT INTO transactions(card_id,kind,unit_price,quantity,trans_date,memo,total_amount) VALUES(?,?,?,?,?,?,?)",
+                  (card_id,kind,total/qty,qty,trans_date,f.get("memo","").strip(),total))
+        c.commit()
+    finally:
+        c.close()
 
 @app.post("/card/<int:card_id>/tx")
 def transaction(card_id):
@@ -208,6 +250,68 @@ def transaction(card_id):
         return render_template("error.html",message=str(e)),400
     return redirect(url_for("card_detail",card_id=card_id))
 
+@app.post("/card/<int:card_id>/tx/<int:tx_id>/cancel")
+def cancel_tx(card_id,tx_id):
+    c=db()
+    try:
+        tx=c.execute("SELECT id FROM transactions WHERE id=? AND card_id=?",(tx_id,card_id)).fetchone()
+        if not tx:
+            return "取引が見つかりません",404
+        rows=c.execute("SELECT * FROM transactions WHERE card_id=? AND id<>? ORDER BY trans_date,id",(card_id,tx_id)).fetchall()
+        qty=0
+        for r in rows:
+            qty += r["quantity"] if r["kind"]=="buy" else -r["quantity"]
+            if qty<0:
+                return "この取引を取り消すと在庫がマイナスになります。関連する売却を先に取り消してください。",400
+        c.execute("DELETE FROM transactions WHERE id=? AND card_id=?",(tx_id,card_id))
+        c.commit()
+    finally:
+        c.close()
+    return redirect(url_for("card_detail",card_id=card_id))
+
+@app.get("/api/card-exists")
+def card_exists():
+    number=normalized_number(request.args.get("card_number"))
+    c=db()
+    try:
+        existing=find_existing(c,number)
+    finally:
+        c.close()
+    return jsonify({"exists":bool(existing),"url":url_for("card_detail",card_id=existing["id"]) if existing else None})
+
+@app.get("/report")
+def monthly_report():
+    month=request.args.get("month") or date.today().strftime("%Y-%m")
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])",month):
+        return "月の指定が正しくありません",400
+    c=db()
+    try:
+        rows=c.execute("SELECT * FROM transactions ORDER BY card_id,trans_date,id").fetchall()
+    finally:
+        c.close()
+    monthly={}
+    balances={}
+    for r in rows:
+        key=r["trans_date"][:7]
+        m=monthly.setdefault(key,{"buy":0,"sell":0,"profit":0,"count":0})
+        m["count"]+=1
+        amount=tx_amount(r)
+        card_id=r["card_id"]
+        qty,cost=balances.get(card_id,(0,0))
+        if r["kind"]=="buy":
+            m["buy"]+=amount
+            qty+=r["quantity"]
+            cost+=amount
+        elif r["quantity"]<=qty:
+            avg=cost/qty
+            m["sell"]+=amount
+            m["profit"]+=amount-avg*r["quantity"]
+            cost-=avg*r["quantity"]
+            qty-=r["quantity"]
+        balances[card_id]=(qty,cost)
+    data=monthly.get(month,{"buy":0,"sell":0,"profit":0,"count":0})
+    return render_template("report.html",month=month,data=data,months=sorted(set(monthly)|{month},reverse=True))
+
 @app.post("/card/<int:card_id>/delete")
 def delete_card(card_id):
     c=db(); c.execute("DELETE FROM cards WHERE id=?",(card_id,)); c.commit(); c.close()
@@ -216,8 +320,13 @@ def delete_card(card_id):
 @app.post("/card/<int:card_id>/edit")
 def edit_card(card_id):
     f=request.form; c=db()
+    number=normalized_number(f.get("card_number"))
+    existing=find_existing(c,number,card_id)
+    if existing:
+        c.close()
+        return redirect(url_for("card_detail",card_id=existing["id"]))
     c.execute("UPDATE cards SET name=?,card_number=?,title=?,rarity=?,image_url=?,notes=? WHERE id=?",
-              (f["name"].strip(),f.get("card_number","").strip(),f.get("title","").strip(),
+              (f["name"].strip(),number,f.get("title","").strip(),
                f.get("rarity","").strip(),f.get("image_url","").strip(),f.get("notes","").strip(),card_id))
     c.commit(); c.close(); return redirect(url_for("card_detail",card_id=card_id))
 
@@ -288,26 +397,19 @@ def bulk_register():
             if not data.get("name"):
                 raise ValueError("公式カード名が取得できませんでした")
             with db() as c:
+                existing=find_existing(c,number)
+                if existing:
+                    skipped += 1
+                    results.append({"number":number,"status":"スキップ","detail":"登録済み"})
+                    continue
                 cursor = c.execute(
                     "INSERT INTO cards(name,card_number,title,rarity,image_url,notes) VALUES(?,?,?,?,?,?)",
-                    (data["name"], number, data.get("title", ""), data.get("rarity", ""), data.get("image_url", ""), "")
+                    (data["name"],number,data.get("title",""),data.get("rarity",""),data.get("image_url",""),"")
                 )
-                card_id = cursor.lastrowid
-
-            if buy_quantity > 0:
-                 c.execute(
-                    "INSERT INTO transactions(card_id,kind,unit_price,quantity,trans_date,memo) VALUES(?,?,?,?,?,?)",
-                     (
-                        card_id,
-                         "buy",
-                         buy_total / buy_quantity,
-                        buy_quantity,
-                         buy_date,
-                         ""
-                     )
-                 )
-
-                 c.commit()
+                card_id=cursor.lastrowid
+                if buy_quantity>0:
+                    c.execute("INSERT INTO transactions(card_id,kind,unit_price,quantity,trans_date,memo,total_amount) VALUES(?,?,?,?,?,?,?)",
+                              (card_id,"buy",buy_total/buy_quantity,buy_quantity,buy_date,"",buy_total))
             created += 1
             results.append({"number":number, "status":"登録完了", "detail":data["name"]})
         except Exception as e:
