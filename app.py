@@ -52,7 +52,12 @@ def init_db():
     columns = {row[1] for row in c.execute("PRAGMA table_info(transactions)")}
     if "total_amount" not in columns:
         c.execute("ALTER TABLE transactions ADD COLUMN total_amount INTEGER")
+    if "shipping_fee" not in columns:
+        c.execute("ALTER TABLE transactions ADD COLUMN shipping_fee INTEGER NOT NULL DEFAULT 0")
     c.commit(); c.close()
+
+def net_sell_amount(row):
+    return tx_amount(row) - (row["shipping_fee"] or 0)
 
 def tx_amount(row):
     return row["total_amount"] if row["total_amount"] is not None else row["unit_price"] * row["quantity"]
@@ -87,8 +92,8 @@ def calc(card_id):
             qty += q; cost += amount; buy_total += amount
         elif q <= qty:
             avg = cost/qty if qty else 0
-            realized += amount - avg*q
-            qty -= q; cost -= avg*q; sell_total += amount
+            realized += net_sell_amount(r) - avg*q
+            qty -= q; cost -= avg*q; sell_total += net_sell_amount(r)
     return {"qty":int(qty),"cost":cost,"avg":cost/qty if qty else 0,"buy_total":buy_total,"sell_total":sell_total,"realized":realized}
 
 def card_row(r):
@@ -129,20 +134,42 @@ def parse_official_json(payload, card_number):
     raise ValueError("公式サイトで一致するカード番号が見つかりませんでした。")
 
 
+def official_item(item):
+    number = str(item.get("card_number") or item.get("card_no") or "").strip().upper()
+    picture = str(item.get("picture") or "").strip().lstrip("/")
+    image_url = urllib.parse.urljoin(OFFICIAL + "/wordpress/wp-content/images/cardlist/", picture) if picture else ""
+    return {"url":official_card_url(number),"name":str(item.get("card_name") or "").strip(),
+            "card_number":number,"rarity":str(item.get("rare") or "").strip(),
+            "image_url":image_url,"title":str(item.get("title") or "").strip()}
+
 def fetch_official(card_number=None, name=None):
-    number = (card_number or "").strip().upper()
-    if not number:
-        raise ValueError("カード番号を入力してください。")
+    number = normalized_number(card_number)
+    keyword = number or (name or "").strip()
+    if not keyword:
+        raise ValueError("カード番号またはカード名を入力してください")
     url = OFFICIAL + "/manage/CardListUser/searchJson"
-    response = requests.get(
-        url,
-        params={"keyword": number, "keyword_type[]": "no"},
-        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json",
-                 "Referer": OFFICIAL + "/cardlist/search/"},
-        timeout=20,
-    )
+    # The official site's search API can change; show an error rather than guessing results.
+    params = {"keyword":keyword,"keyword_type[]":"no" if number else "name"}
+    response = requests.get(url, params=params,
+        headers={"User-Agent":"Mozilla/5.0", "Accept":"application/json",
+                 "Referer":OFFICIAL + "/cardlist/search/"},timeout=20)
     response.raise_for_status()
-    return parse_official_json(response.json(), number)
+    payload = response.json()
+    items = payload.get("items",[]) if isinstance(payload,dict) else []
+    if not isinstance(items,list):
+        raise ValueError("公式サイトの応答形式が変更された可能性があります")
+    if number:
+        return [parse_official_json(payload,number)]
+    matches = [official_item(item) for item in items if isinstance(item,dict)
+               and keyword.casefold() in str(item.get("card_name") or "").casefold()]
+    # Dedupe card numbers and limit displayed results.
+    unique = {}
+    for item in matches:
+        if item["card_number"]:
+            unique[item["card_number"]] = item
+    if not unique:
+        raise ValueError("一致するカードが見つかりません。公式サイトの検索仕様が変更された可能性もあります")
+    return list(unique.values())[:60]
 
 
 def download_image(url, card_id):
@@ -180,7 +207,7 @@ def card_detail(card_id):
     if not r: return "Not found",404
     tx=c.execute("SELECT * FROM transactions WHERE card_id=? ORDER BY trans_date DESC,id DESC",(card_id,)).fetchall()
     c.close()
-    return render_template("card.html",card=card_row(r),transactions=[dict(x, amount=tx_amount(x)) for x in tx],today=date.today().isoformat())
+    return render_template("card.html",card=card_row(r),transactions=[dict(x, amount=tx_amount(x), shipping_fee=x["shipping_fee"] or 0) for x in tx],today=date.today().isoformat())
 
 @app.route("/card/new",methods=["GET","POST"])
 def new_card():
@@ -228,6 +255,9 @@ def add_tx(card_id,kind,f):
         raise ValueError("枚数を正しく入力してください")
     if qty<=0: raise ValueError("枚数は1以上にしてください")
     total=valid_amount(f.get("total_amount"))
+    shipping=valid_amount(f.get("shipping_fee") or 0) if kind=="sell" else 0
+    if shipping>total:
+        raise ValueError("送料は売却合計金額以下にしてください")
     trans_date=f.get("trans_date") or date.today().isoformat()
     date.fromisoformat(trans_date)
     c=db()
@@ -236,8 +266,8 @@ def add_tx(card_id,kind,f):
             raise ValueError("カードが見つかりません")
         if kind=="sell" and qty>calc(card_id)["qty"]:
             raise ValueError("売却枚数が所持枚数を超えています")
-        c.execute("INSERT INTO transactions(card_id,kind,unit_price,quantity,trans_date,memo,total_amount) VALUES(?,?,?,?,?,?,?)",
-                  (card_id,kind,total/qty,qty,trans_date,f.get("memo","").strip(),total))
+        c.execute("INSERT INTO transactions(card_id,kind,unit_price,quantity,trans_date,memo,total_amount,shipping_fee) VALUES(?,?,?,?,?,?,?,?)",
+                  (card_id,kind,(total-shipping)/qty,qty,trans_date,f.get("memo","").strip(),total,shipping))
         c.commit()
     finally:
         c.close()
@@ -334,7 +364,7 @@ def edit_card(card_id):
 def api_official():
     try:
         result=fetch_official(request.args.get("card_number"),request.args.get("name"))
-        return jsonify({"ok":True,"data":result})
+        return jsonify({"ok":True,"data":result[0] if len(result)==1 else None,"results":result})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
 
